@@ -1,0 +1,135 @@
+name: redis-test
+
+networks:
+  redis-net:
+    driver: bridge
+
+volumes:
+  redis-master-data:
+  redis-replica-1-data:
+  redis-replica-2-data:
+  redis-replica-3-data:
+  sentinel-1-data:
+  sentinel-2-data:
+
+services:
+  # ── Redis 6.2 nodes (base cluster) ───────────────────────────────────────
+
+  redis-master:
+    image: redis:6.2
+    container_name: redis-master
+    command: redis-server /config/redis.conf
+    volumes:
+      - ./config/redis.conf:/config/redis.conf:ro
+      - redis-master-data:/data
+    ports:
+      - "6379:6379"
+    networks:
+      - redis-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis-replica-1:
+    image: redis:6.2
+    container_name: redis-replica-1
+    command: redis-server /config/redis.conf --replicaof redis-master 6379
+    volumes:
+      - ./config/redis.conf:/config/redis.conf:ro
+      - redis-replica-1-data:/data
+    ports:
+      - "6380:6379"
+    networks:
+      - redis-net
+    depends_on:
+      redis-master:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # ── Redis 8.2 nodes (Option A upgrade — not started by default) ──────────
+
+  redis-replica-2:
+    image: redis:8.2
+    container_name: redis-replica-2
+    command: redis-server /config/redis.conf --replicaof redis-master 6379
+    volumes:
+      - ./config/redis.conf:/config/redis.conf:ro
+      - redis-replica-2-data:/data
+    ports:
+      - "6381:6379"
+    networks:
+      - redis-net
+    profiles:
+      - v82
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis-replica-3:
+    image: redis:8.2
+    container_name: redis-replica-3
+    command: redis-server /config/redis.conf --replicaof redis-master 6379
+    volumes:
+      - ./config/redis.conf:/config/redis.conf:ro
+      - redis-replica-3-data:/data
+    ports:
+      - "6382:6379"
+    networks:
+      - redis-net
+    profiles:
+      - v82
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # ── Sentinels (quorum = 1) ────────────────────────────────────────────────
+
+  sentinel-1:
+    image: redis:6.2
+    container_name: sentinel-1
+    entrypoint: ["sh", "/config/sentinel-entrypoint.sh"]
+    volumes:
+      - ./config/sentinel-entrypoint.sh:/config/sentinel-entrypoint.sh:ro
+      - sentinel-1-data:/sentinel-data
+    ports:
+      - "26379:26379"
+    networks:
+      - redis-net
+    environment:
+      SENTINEL_MASTER_HOST: redis-master
+      SENTINEL_MASTER_PORT: "6379"
+      SENTINEL_QUORUM: "1"
+      SENTINEL_PORT: "26379"
+    depends_on:
+      redis-master:
+        condition: service_healthy
+
+  sentinel-2:
+    image: redis:6.2
+    container_name: sentinel-2
+    entrypoint: ["sh", "/config/sentinel-entrypoint.sh"]
+    volumes:
+      - ./config/sentinel-entrypoint.sh:/config/sentinel-entrypoint.sh:ro
+      - sentinel-2-data:/sentinel-data
+    ports:
+      - "26380:26379"
+    networks:
+      - redis-net
+    environment:
+      SENTINEL_MASTER_HOST: redis-master
+      SENTINEL_MASTER_PORT: "6379"
+      SENTINEL_QUORUM: "1"
+      SENTINEL_PORT: "26379"
+    depends_on:
+      redis-master:
+        condition: service_healthy

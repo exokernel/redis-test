@@ -1,0 +1,4 @@
+.claude/
+backups/*
+.keycount
+.last_backup
