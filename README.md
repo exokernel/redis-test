@@ -91,13 +91,13 @@ redis-cli -p 6379 --scan --pattern "testkey:*"
 
 ### What rollback does
 
-1. Stops all containers (including any running 8.2 nodes)
+1. Stops Redis nodes (sentinels stay running, as they would in production)
 2. Wipes the `redis-master` and `redis-replica-1` data volumes
 3. Copies the selected `dump.rdb` into the `redis-master` volume
 4. Boots a **temporary** Redis 6.2 container with `appendonly no` to load the RDB — this is necessary because Redis 6.2 with `appendonly yes` will not load an RDB when no AOF file is present; it just starts empty
 5. Enables AOF and runs `BGREWRITEAOF` to persist the dataset as an AOF, then shuts down the temp container
-6. Starts the normal 6.2 cluster (master + replica-1 + sentinels) — Redis now loads from the AOF generated in step 5
-7. Sentinel config volumes are cleared so sentinels re-generate pointing back to `redis-master`
+6. Starts `redis-master` (6.2) and `redis-replica-1` (6.2) — Redis now loads from the AOF generated in step 5
+7. Reconfigures running sentinels to track the restored master via `SENTINEL REMOVE` + `SENTINEL MONITOR`
 
 ### Rollback caveats
 
@@ -112,7 +112,7 @@ In production, the equivalent steps are:
 2. Provision a Redis 6.2 node (or downgrade an existing node before it ever replicated from an 8.2 master)
 3. Copy the pre-failover `dump.rdb` to the node's data directory
 4. Start Redis 6.2 with `appendonly no`, verify data loaded, then enable `appendonly yes` and run `BGREWRITEAOF`
-5. Update sentinel to monitor the restored 6.2 node
+5. Reconfigure sentinels to track the restored node (`SENTINEL REMOVE` + `SENTINEL MONITOR`, or `SENTINEL RESET` 30s apart)
 
 ## Notes
 
