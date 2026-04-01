@@ -3,10 +3,11 @@
 # Use after a failed upgrade where an 8.2 leader was elected.
 #
 # Steps:
-#   1. Stop all containers (including any 8.2 nodes)
+#   1. Stop redis nodes (not sentinels — they stay running, as in production)
 #   2. Clear redis-master and redis-replica-1 data volumes
-#   3. Restore selected dump.rdb into redis-master volume (no AOF, so Redis loads RDB)
-#   4. Start redis-master (6.2), redis-replica-1 (6.2), and sentinels
+#   3. Restore selected dump.rdb, boot temp Redis to generate AOF
+#   4. Start redis-master (6.2) and redis-replica-1 (6.2)
+#   5. Reconfigure sentinels to track the restored master via SENTINEL REMOVE + MONITOR
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -50,16 +51,22 @@ echo ""
 echo "Selected: $BACKUP_RDB"
 echo ""
 echo "This will:"
-echo "  - Stop ALL redis containers (including any running 8.2 nodes)"
+echo "  - Stop all Redis nodes (sentinels stay running)"
 echo "  - Wipe redis-master and redis-replica-1 data volumes"
 echo "  - Restore $BACKUP_RDB into redis-master"
-echo "  - Restart the Redis 6.2 cluster (master + replica-1 + sentinels)"
+echo "  - Start redis-master (6.2) and redis-replica-1 (6.2)"
+echo "  - Reconfigure sentinels to track the restored master"
 echo ""
 confirm "Proceed with rollback?"
 
-# ── Stop all containers ───────────────────────────────────────────────────────
-header "Stopping all containers..."
-docker-compose --profile v82 down 2>/dev/null || docker-compose down
+# ── Stop redis nodes (not sentinels) ─────────────────────────────────────────
+header "Stopping Redis nodes..."
+# Stop 8.2 nodes if running
+docker-compose --profile v82 stop redis-replica-2 redis-replica-3 2>/dev/null || true
+docker-compose --profile v82 rm -f redis-replica-2 redis-replica-3 2>/dev/null || true
+# Stop 6.2 nodes if running
+docker-compose stop redis-master redis-replica-1 2>/dev/null || true
+docker-compose rm -f redis-master redis-replica-1 2>/dev/null || true
 
 # ── Wipe data volumes (redis-master and redis-replica-1) ─────────────────────
 header "Clearing data volumes..."
@@ -68,14 +75,6 @@ for vol in "${PROJECT_NAME}_redis-master-data" "${PROJECT_NAME}_redis-replica-1-
     echo "  Clearing $vol..."
     docker run --rm -v "${vol}:/data" redis:6.2 \
         sh -c "rm -f /data/dump.rdb /data/appendonly.aof /data/appendonly.aof.manifest && echo '  Done.'"
-done
-
-# ── Clear sentinel configs so they re-generate pointing to redis-master ───────
-header "Clearing sentinel config volumes..."
-
-for vol in "${PROJECT_NAME}_sentinel-1-data" "${PROJECT_NAME}_sentinel-2-data"; do
-    docker run --rm -v "${vol}:/sentinel-data" redis:6.2 \
-        sh -c "rm -f /sentinel-data/sentinel.conf && echo '  Cleared.'"
 done
 
 # ── Restore RDB and generate AOF ─────────────────────────────────────────────
@@ -92,13 +91,6 @@ docker run --rm \
     sh -c "cp /backup/dump.rdb /data/dump.rdb && echo 'RDB copied.'"
 
 echo "Starting temp Redis to load RDB and generate AOF..."
-docker run --rm -d --name redis-restore \
-    --network "${PROJECT_NAME}_redis-net" 2>/dev/null \
-    -v "${PROJECT_NAME}_redis-master-data:/data" \
-    -v "$(pwd)/config/redis.conf:/config/redis.conf:ro" \
-    -p 6379:6379 \
-    redis:6.2 \
-    redis-server /config/redis.conf --appendonly no || \
 docker run --rm -d --name redis-restore \
     -v "${PROJECT_NAME}_redis-master-data:/data" \
     -v "$(pwd)/config/redis.conf:/config/redis.conf:ro" \
@@ -127,13 +119,33 @@ echo " done."
 
 docker stop redis-restore > /dev/null
 
-# ── Start Redis 6.2 cluster ───────────────────────────────────────────────────
-header "Starting Redis 6.2 cluster..."
-docker-compose up -d redis-master redis-replica-1 sentinel-1 sentinel-2
+# ── Start Redis 6.2 nodes ────────────────────────────────────────────────────
+header "Starting Redis 6.2 nodes..."
+docker-compose up -d redis-master redis-replica-1
 
 echo ""
-echo "Waiting 15s for cluster to settle..."
-sleep 15
+echo "Waiting 10s for replication to sync..."
+sleep 10
+
+# ── Reconfigure sentinels to track restored master ───────────────────────────
+header "Reconfiguring sentinels to track restored master..."
+
+NEW_MASTER_IP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' redis-master)
+echo "Restored master IP: $NEW_MASTER_IP"
+echo ""
+
+for port in "$SENTINEL_PORT_1" "$SENTINEL_PORT_2"; do
+    echo "Sentinel on port $port:"
+    redis-cli -p "$port" SENTINEL REMOVE mymaster 2>/dev/null || true
+    redis-cli -p "$port" SENTINEL MONITOR mymaster "$NEW_MASTER_IP" 6379 1
+    redis-cli -p "$port" SENTINEL SET mymaster down-after-milliseconds 5000
+    redis-cli -p "$port" SENTINEL SET mymaster failover-timeout 30000
+    redis-cli -p "$port" SENTINEL SET mymaster parallel-syncs 1
+    echo ""
+done
+
+echo "Waiting for sentinels to discover replicas..."
+sleep 5
 "$SCRIPT_DIR/status.sh"
 
 header "Rollback Complete"

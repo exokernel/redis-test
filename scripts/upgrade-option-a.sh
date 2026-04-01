@@ -126,23 +126,25 @@ docker-compose rm -f redis-master
 sleep 3
 
 # ── Step 7: Reconfigure sentinel ──────────────────────────────────────────────
-header "Step 7/7 — Reconfigure sentinel to track new master"
-echo "Updating sentinel config to point to $PROMOTE_TARGET ($NEW_MASTER_IP)..."
+header "Step 7/7 — Reset sentinel to track new master"
+echo "Removing old master definition and re-registering with new master IP ($NEW_MASTER_IP)..."
+echo ""
+echo "  In production with working sentinel (no TILT), you could use:"
+echo "    sentinel reset mymaster   (on each sentinel, 30s apart)"
+echo "  Here we use REMOVE + MONITOR to be explicit about the new master."
+echo ""
 
-for sentinel_container in sentinel-1 sentinel-2; do
-    docker exec "$sentinel_container" sh -c "cat > /sentinel-data/sentinel.conf <<EOF
-port 26379
-sentinel monitor mymaster $NEW_MASTER_IP 6379 1
-sentinel down-after-milliseconds mymaster 5000
-sentinel failover-timeout mymaster 30000
-sentinel parallel-syncs mymaster 1
-sentinel resolve-hostnames yes
-sentinel announce-hostnames yes
-EOF"
+for port in "$SENTINEL_PORT_1" "$SENTINEL_PORT_2"; do
+    echo "Sentinel on port $port:"
+    redis-cli -p "$port" SENTINEL REMOVE mymaster 2>/dev/null || true
+    redis-cli -p "$port" SENTINEL MONITOR mymaster "$NEW_MASTER_IP" 6379 1
+    redis-cli -p "$port" SENTINEL SET mymaster down-after-milliseconds 5000
+    redis-cli -p "$port" SENTINEL SET mymaster failover-timeout 30000
+    redis-cli -p "$port" SENTINEL SET mymaster parallel-syncs 1
+    echo ""
 done
 
-echo "Restarting sentinels..."
-docker restart sentinel-1 sentinel-2
+echo "Waiting for sentinels to discover replicas..."
 sleep 10
 
 header "Upgrade Complete"
