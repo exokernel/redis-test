@@ -1,0 +1,127 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: redis-config
+  namespace: redis-test
+data:
+  # ── redis.conf ────────────────────────────────────────────────────────────────
+  # Identical to compose/config/redis.conf — works as-is in k8s.
+  redis.conf: |
+    # Redis config for redis-test k8s environment
+    bind 0.0.0.0
+    protected-mode no
+    port 6379
+    tcp-backlog 511
+    timeout 0
+    tcp-keepalive 300
+    daemonize no
+    supervised no
+    loglevel notice
+    databases 1
+    set-proc-title no
+
+    # Persistence: RDB
+    save 900 1
+    stop-writes-on-bgsave-error yes
+    rdbcompression yes
+    rdbchecksum yes
+    dbfilename dump.rdb
+    dir /data
+
+    # Replication
+    replica-serve-stale-data yes
+    replica-read-only yes
+    repl-diskless-sync yes
+    repl-diskless-sync-delay 5
+    repl-diskless-load disabled
+    repl-ping-replica-period 10
+    repl-timeout 60
+    repl-disable-tcp-nodelay no
+    repl-backlog-size 1mb
+    repl-backlog-ttl 3600
+    replica-priority 100
+    min-replicas-to-write 0
+    min-replicas-max-lag 10
+
+    # Matches prod — scripts must use SCAN instead of KEYS
+    rename-command KEYS KEYS-DONOTEXECUTEINPROD
+
+    # Reduced from prod values for local testing
+    maxclients 100
+    maxmemory 256mb
+    maxmemory-policy volatile-lru
+    maxmemory-samples 3
+
+    io-threads 1
+
+    # Persistence: AOF
+    appendonly yes
+    appendfilename appendonly.aof
+    appendfsync everysec
+    no-appendfsync-on-rewrite no
+    auto-aof-rewrite-percentage 100
+    auto-aof-rewrite-min-size 128mb
+
+    lua-time-limit 5000
+    slowlog-log-slower-than 5000
+    slowlog-max-len 128
+    notify-keyspace-events ""
+
+    # Compact encoding thresholds
+    hash-max-ziplist-entries 512
+    hash-max-ziplist-value 64
+    set-max-intset-entries 512
+    zset-max-ziplist-entries 128
+    zset-max-ziplist-value 64
+
+    activerehashing yes
+    client-output-buffer-limit normal 0 0 0
+    client-output-buffer-limit replica 1073741824 1073741824 60
+    client-output-buffer-limit pubsub 32mb 8mb 60
+    hz 10
+    dynamic-hz yes
+    aof-rewrite-incremental-fsync yes
+    rdb-save-incremental-fsync yes
+
+  # ── sentinel-entrypoint.sh ────────────────────────────────────────────────────
+  # Generates sentinel.conf on first boot, then starts redis-sentinel.
+  # On pod restarts, the sentinel-rewritten config is preserved on the PVC
+  # (contains updated master address after any failover).
+  #
+  # Functionally equivalent to compose/config/sentinel-entrypoint.sh.
+  # Heredoc replaced with echo statements so the script embeds cleanly in YAML.
+  sentinel-entrypoint.sh: |
+    #!/bin/sh
+    set -e
+
+    CONFIG=/sentinel-data/sentinel.conf
+
+    if [ ! -f "$CONFIG" ]; then
+        # Wait for the master hostname to be resolvable via k8s DNS
+        MASTER_HOST="${SENTINEL_MASTER_HOST:-redis-node-0.redis-headless.redis-test.svc.cluster.local}"
+        echo "Waiting for $MASTER_HOST to be resolvable..."
+        while true; do
+            getent hosts "$MASTER_HOST" >/dev/null 2>&1 && break
+            sleep 1
+        done
+        echo "$MASTER_HOST is resolvable"
+
+        # Use the hostname (not the resolved IP) in sentinel monitor.
+        # With resolve-hostnames yes, sentinel accepts hostnames here and —
+        # critically — returns the hostname from get-master-addr-by-name,
+        # which is what _common.sh:get_master_pod() parses.
+        {
+            echo "port ${SENTINEL_PORT:-26379}"
+            echo "sentinel monitor mymaster ${MASTER_HOST} ${SENTINEL_MASTER_PORT:-6379} ${SENTINEL_QUORUM:-1}"
+            echo "sentinel down-after-milliseconds mymaster 5000"
+            echo "sentinel failover-timeout mymaster 30000"
+            echo "sentinel parallel-syncs mymaster 1"
+            echo "sentinel resolve-hostnames yes"
+            echo "sentinel announce-hostnames yes"
+        } > "$CONFIG"
+
+        echo "Generated sentinel config:"
+        cat "$CONFIG"
+    fi
+
+    exec redis-sentinel "$CONFIG"

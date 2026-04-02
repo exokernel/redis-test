@@ -12,13 +12,13 @@ MASTER_NAME=$(get_current_master_name)
 
 echo "Triggering BGSAVE on $MASTER_NAME (localhost:$MASTER_PORT)..."
 
-BEFORE=$(redis-cli -p "$MASTER_PORT" LASTSAVE)
 redis-cli -p "$MASTER_PORT" BGSAVE > /dev/null
 
 echo -n "Waiting for BGSAVE to complete"
 while true; do
-    AFTER=$(redis-cli -p "$MASTER_PORT" LASTSAVE)
-    [ "$AFTER" != "$BEFORE" ] && break
+    IN_PROGRESS=$(redis-cli -p "$MASTER_PORT" INFO persistence \
+        | grep rdb_bgsave_in_progress | tr -d '\r' | cut -d: -f2)
+    [ "$IN_PROGRESS" = "0" ] && break
     echo -n "."
     sleep 1
 done

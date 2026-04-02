@@ -1,0 +1,49 @@
+# ── Headless Service ──────────────────────────────────────────────────────────
+# clusterIP: None gives every pod a stable DNS name:
+#   redis-node-0.redis-headless.redis-test.svc.cluster.local
+#   redis-node-1.redis-headless.redis-test.svc.cluster.local
+#
+# This is the serviceName the StatefulSet references.  Pod-to-pod replication
+# and sentinel host resolution both use these names.
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-headless
+  namespace: redis-test
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: redis
+    app.kubernetes.io/component: node
+    app.kubernetes.io/instance: redis
+  ports:
+  - name: redis
+    port: 6379
+    targetPort: redis
+  - name: sentinel
+    port: 26379
+    targetPort: sentinel
+---
+# ── ClusterIP Service ─────────────────────────────────────────────────────────
+# Standard load-balancing service for external cluster access.
+# Used by "make connect" (port-forward) and any in-cluster clients.
+# Note: load-balances across both pods — use sentinel on :26379 to discover
+# the current master before sending writes.
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: redis-test
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: redis
+    app.kubernetes.io/component: node
+    app.kubernetes.io/instance: redis
+  ports:
+  - name: redis
+    port: 6379
+    targetPort: redis
+  - name: sentinel
+    port: 26379
+    targetPort: sentinel

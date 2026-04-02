@@ -1,4 +1,11 @@
 .claude/
-backups/*
-.keycount
-.last_backup
+
+# Docker Compose environment
+compose/backups/*
+compose/.keycount
+compose/.last_backup
+
+# Kubernetes environment
+k8s/.keycount
+k8s/.last_backup
+k8s/backups/

@@ -1,0 +1,132 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redis-node
+  namespace: redis-test
+spec:
+  # Must match the headless service name so k8s builds pod DNS entries.
+  serviceName: redis-headless
+  replicas: 2
+  # OrderedReady (default): pods created/deleted in order.
+  # redis-node-0 becomes Ready before redis-node-1 starts — master is up
+  # before the replica tries to connect to it.
+  podManagementPolicy: OrderedReady
+  updateStrategy:
+    type: RollingUpdate   # highest ordinal first: node-1 (replica) → node-0 (master)
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: redis
+      app.kubernetes.io/component: node
+      app.kubernetes.io/instance: redis
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: redis
+        app.kubernetes.io/component: node
+        app.kubernetes.io/instance: redis
+    spec:
+      containers:
+      # ── redis-server ──────────────────────────────────────────────────────────
+      # Pod-0 starts as master (no replicaof).
+      # Pod-1+ start as replicas, pointing at pod-0's headless DNS name.
+      - name: redis
+        image: redis:8.2
+        command: ["/bin/sh", "-c"]
+        args:
+        - |
+          if echo "$MY_POD_NAME" | grep -q -- '-0$'; then
+            exec redis-server /config/redis.conf
+          else
+            exec redis-server /config/redis.conf \
+              --replicaof redis-node-0.redis-headless.redis-test.svc.cluster.local 6379
+          fi
+        env:
+        - name: MY_POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        ports:
+        - name: redis
+          containerPort: 6379
+        volumeMounts:
+        - name: redis-config
+          mountPath: /config/redis.conf
+          subPath: redis.conf
+        - name: redis-data
+          mountPath: /data
+        readinessProbe:
+          exec:
+            command: [redis-cli, ping]
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          failureThreshold: 6
+        livenessProbe:
+          exec:
+            command: [redis-cli, ping]
+          initialDelaySeconds: 15
+          periodSeconds: 10
+
+      # ── redis-sentinel (sidecar) ──────────────────────────────────────────────
+      # Shares the pod network — sentinel is reachable at localhost:26379 from
+      # the redis container, and at <pod-ip>:26379 / pod-dns:26379 from outside.
+      #
+      # On first boot: resolves SENTINEL_MASTER_HOST, generates sentinel.conf,
+      #   writes it to /sentinel-data (PVC — persists across pod restarts).
+      # On subsequent boots: reuses the existing sentinel.conf, which sentinel
+      #   itself keeps updated after any failover.
+      - name: sentinel
+        image: redis:8.2
+        command: ["/bin/sh", "/scripts/sentinel-entrypoint.sh"]
+        env:
+        - name: SENTINEL_MASTER_HOST
+          value: redis-node-0.redis-headless.redis-test.svc.cluster.local
+        - name: SENTINEL_QUORUM
+          value: "1"
+        - name: SENTINEL_PORT
+          value: "26379"
+        ports:
+        - name: sentinel
+          containerPort: 26379
+        volumeMounts:
+        - name: redis-config
+          mountPath: /scripts/sentinel-entrypoint.sh
+          subPath: sentinel-entrypoint.sh
+        - name: sentinel-data
+          mountPath: /sentinel-data
+        readinessProbe:
+          exec:
+            command: [redis-cli, -p, "26379", ping]
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          failureThreshold: 6
+
+      volumes:
+      # ConfigMap volume: redis.conf + sentinel-entrypoint.sh.
+      # Per-container subPath mounts select which file each container sees.
+      - name: redis-config
+        configMap:
+          name: redis-config
+          defaultMode: 0755    # sentinel-entrypoint.sh needs to be executable
+
+  # ── PersistentVolumeClaims ────────────────────────────────────────────────────
+  # k8s creates one PVC per pod, named <template-name>-<pod-name>:
+  #   redis-data-redis-node-0, redis-data-redis-node-1
+  #   sentinel-data-redis-node-0, sentinel-data-redis-node-1
+  #
+  # PVCs survive "make down" (StatefulSet deletion) — delete the namespace
+  # ("make reset") to fully wipe data.
+  volumeClaimTemplates:
+  - metadata:
+      name: redis-data
+    spec:
+      accessModes: [ReadWriteOnce]
+      resources:
+        requests:
+          storage: 500Mi
+  - metadata:
+      name: sentinel-data
+    spec:
+      accessModes: [ReadWriteOnce]
+      resources:
+        requests:
+          storage: 50Mi
