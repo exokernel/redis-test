@@ -112,21 +112,10 @@ sleep 3
 
 echo ""
 echo "New master: $PROMOTE_TARGET (Redis 8.2)"
-confirm "Promotion complete. Continue to remove old 6.2 master?"
+confirm "Promotion complete. Continue to reconfigure sentinels?"
 
-# ── Step 6: Remove 6.2 master ────────────────────────────────────────────────
-header "Step 6/7 — Remove former Redis 6.2 master (redis-master)"
-echo "The former master cannot replicate from an 8.2 node."
-echo "Stopping it now."
-confirm "Stop and remove redis-master?"
-
-docker-compose stop redis-master
-docker-compose rm -f redis-master
-
-sleep 3
-
-# ── Step 7: Reconfigure sentinel ──────────────────────────────────────────────
-header "Step 7/7 — Reset sentinel to track new master"
+# ── Step 6: Reconfigure sentinel ──────────────────────────────────────────────
+header "Step 6/7 — Reset sentinel to track new master"
 echo "Removing old master definition and re-registering with new master IP ($NEW_MASTER_IP)..."
 echo ""
 echo "  In production with working sentinel (no TILT), you could use:"
@@ -146,6 +135,20 @@ done
 
 echo "Waiting for sentinels to discover replicas..."
 sleep 10
+
+"$SCRIPT_DIR/status.sh"
+confirm "Sentinels reconfigured. Continue to remove old 6.2 master?"
+
+# ── Step 7: Remove 6.2 master ────────────────────────────────────────────────
+header "Step 7/7 — Remove former Redis 6.2 master (redis-master)"
+echo "The former master cannot replicate from an 8.2 node."
+echo "Stopping it now."
+confirm "Stop and remove redis-master?"
+
+docker-compose stop redis-master
+docker-compose rm -f redis-master
+
+sleep 3
 
 header "Upgrade Complete"
 "$SCRIPT_DIR/status.sh"
