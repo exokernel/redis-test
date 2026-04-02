@@ -69,7 +69,7 @@ pod as master regardless of ordinal — either pod can be master at any time.
 | Master/replica | Fixed container names | Sentinel-elected at runtime |
 | External access | Host ports (`-p`) | `kubectl port-forward` |
 | Upgrade | Manual step-by-step script | `kubectl set image` → rolling restart |
-| Rollback | RDB restore surgery | `kubectl set image` back |
+| Rollback | RDB restore surgery | RDB restore via helper pod → rolling restart |
 
 ## Commands
 
@@ -81,8 +81,9 @@ pod as master regardless of ordinal — either pod can be master at any time.
 | `make status` | Show pods, sentinel state, roles, versions |
 | `make insert` | Write 100 test keys (`make insert COUNT=500` to override) |
 | `make verify` | Assert all inserted keys are present with correct values |
-| `make upgrade` | Interactive upgrade walkthrough: 8.2 → 8.6 |
-| `make rollback` | Roll back to Redis 8.2 |
+| `make backup` | Snapshot current master RDB to `backups/<timestamp>/dump.rdb` |
+| `make upgrade` | Backup → patch to 8.6 → rolling restart (sentinel handles failover) |
+| `make rollback` | Restore RDB backup → restart on 8.2 |
 | `make connect` | Port-forward Redis+sentinel to localhost for `redis-cli` |
 
 ## Typical test flow
@@ -122,6 +123,11 @@ The Sentinel failover happens mid-rollout, automatically, with no manual
 intervention. This replaces the entire Option A script from the Compose
 environment.
 
+**Downtime:** reads are zero-downtime throughout. Writes have a ~5 second gap
+while sentinel detects the master is down and promotes node-1 (`down-after-milliseconds`).
+Redis client libraries with retry logic (Lettuce, StackExchange.Redis) handle
+this transparently.
+
 During the rollout, watch progress in another terminal:
 
 ```bash
@@ -134,8 +140,21 @@ kubectl get pods -n redis-test -w
 make rollback
 ```
 
-Patches the image back to `redis:8.2` and waits for the rolling restart to
-complete. Same mechanism as the upgrade — no RDB file handling required.
+Rolling back Redis is not a simple image swap. Redis 8.6 writes RDB format
+version 13 which Redis 8.2 cannot read, so a rolling restart would leave each
+pod crashlooping as it tries to load 8.6-format data.
+
+`make rollback` handles this by:
+
+1. Scaling the StatefulSet to 0 (brief full outage — this is not zero-downtime)
+2. Spinning up a temporary `redis:8.2` helper pod mounting node-0's PVC
+3. Copying the pre-upgrade backup RDB into `/data/`
+4. Starting a temporary redis-server with `--appendonly no` to load the RDB,
+   then `CONFIG SET appendonly yes` + `BGREWRITEAOF` to generate a valid AOF
+   (Redis ignores `dump.rdb` on startup when `appendonly yes` and no AOF exists)
+5. Scaling back up — node-0 loads the restored AOF, node-1 syncs from it
+
+Data written after the backup snapshot is lost. Run `make verify` afterwards.
 
 ## Manual inspection
 
