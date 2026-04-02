@@ -7,7 +7,7 @@ NAMESPACE := redis-test
 # Deploy Redis 8.2 with sentinel into the redis-test namespace.
 # Services are applied before the StatefulSet (alphabetical order in manifests/)
 # so pod DNS is available before pods start.
-# --wait blocks until all pods report Ready (both containers per pod).
+# rollout status blocks until all pods report Ready (both containers per pod).
 up:
 	kubectl create namespace $(NAMESPACE) --dry-run=client -o yaml | kubectl apply -f -
 	kubectl apply -f manifests/
@@ -55,7 +55,8 @@ upgrade:
 #
 # Downgrading Redis is not a simple image swap: Redis 8.6 writes RDB format
 # version 13 which Redis 8.2 cannot read.  rdb-restore.sh handles this by
-# scaling to 0, writing the backup RDB into node-0's PVC via a temporary pod,
+# scaling to 0, restoring the backup RDB via a temporary helper pod (which also
+# regenerates the AOF — Redis ignores dump.rdb on startup when appendonly=yes),
 # then scaling back up on redis:8.2.
 rollback:
 	@bash scripts/rdb-restore.sh
