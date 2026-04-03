@@ -63,10 +63,10 @@ sleep 3
 "$SCRIPT_DIR/status.sh"
 confirm "State looks good? Continue?"
 
-# ── Step 4: RDB backup ────────────────────────────────────────────────────────
-header "Step 4/7 — RDB backup (pre-failover safety net)"
-echo "Taking BGSAVE snapshot of the current 6.2 master..."
-"$SCRIPT_DIR/rdb-backup.sh"
+# ── Step 4: AOF backup ───────────────────────────────────────────────────────
+header "Step 4/7 — AOF backup (pre-failover safety net)"
+echo "Copying AOF from the current 6.2 master..."
+"$SCRIPT_DIR/aof-backup.sh"
 BACKUP_PATH=$(cat "$SCRIPT_DIR/../.last_backup")
 echo ""
 echo "Backup written to: $BACKUP_PATH"
@@ -75,8 +75,8 @@ confirm "Backup complete. Continue to point of no return?"
 # ── Step 5: Promote 8.2 replica ──────────────────────────────────────────────
 header "Step 5/7 — [POINT OF NO RETURN] Promote $PROMOTE_TARGET to master"
 echo ""
-echo "  WARNING: After this step, rolling back requires restoring from RDB."
-echo "           Any writes after the BGSAVE snapshot will be lost on rollback."
+echo "  WARNING: After this step, rolling back requires restoring from the AOF backup."
+echo "           Any writes after the backup snapshot will be lost on rollback."
 echo ""
 echo "  Current backup: $BACKUP_PATH"
 echo ""

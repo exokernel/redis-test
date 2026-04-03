@@ -35,9 +35,9 @@ insert:
 verify:
 	@bash scripts/verify-data.sh
 
-# BGSAVE on current master + copy dump.rdb to ./backups/<timestamp>/
+# Copy AOF from current master to ./backups/<timestamp>/
 backup:
-	@bash scripts/rdb-backup.sh
+	@bash scripts/aof-backup.sh
 
 # ── Upgrade / rollback ────────────────────────────────────────────────────────
 
@@ -45,6 +45,6 @@ backup:
 upgrade:
 	@bash scripts/upgrade-option-a.sh
 
-# Restore from a saved RDB backup to Redis 6.2
+# Restore from a saved AOF backup to Redis 6.2
 rollback:
 	@bash scripts/rollback.sh

@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Restore the cluster to Redis 6.2 from a saved RDB backup.
+# Restore the cluster to Redis 6.2 from a saved AOF backup.
 # Use after a failed upgrade where an 8.2 leader was elected.
 #
 # Steps:
 #   1. Stop redis nodes (not sentinels — they stay running, as in production)
 #   2. Clear redis-master and redis-replica-1 data volumes
-#   3. Restore selected dump.rdb, boot temp Redis to generate AOF
-#   4. Start redis-master (6.2) and redis-replica-1 (6.2)
+#   3. Copy saved AOF into redis-master data volume
+#   4. Start redis-master (6.2) and redis-replica-1 (6.2) — Redis loads AOF on startup
 #   5. Reconfigure sentinels to track the restored master via SENTINEL REMOVE + MONITOR
 set -euo pipefail
 
@@ -17,7 +17,7 @@ cd "$SCRIPT_DIR/.."
 
 BACKUP_BASE="$SCRIPT_DIR/../backups"
 
-header "Redis Rollback: Restore to Redis 6.2 from RDB"
+header "Redis Rollback: Restore to Redis 6.2 from AOF"
 
 # ── Select backup ─────────────────────────────────────────────────────────────
 if [ ! -d "$BACKUP_BASE" ] || [ -z "$(ls -A "$BACKUP_BASE" 2>/dev/null)" ]; then
@@ -39,21 +39,26 @@ echo -n "Select backup [1]: "
 read -r sel
 sel="${sel:-1}"
 
-BACKUP_DIR="$BACKUP_BASE/${BACKUPS[$((sel-1))]}"
-BACKUP_RDB="$BACKUP_DIR/dump.rdb"
+if ! [[ "$sel" =~ ^[0-9]+$ ]] || [ "$sel" -lt 1 ] || [ "$sel" -gt "${#BACKUPS[@]}" ]; then
+    echo "ERROR: Invalid selection '$sel'. Enter a number between 1 and ${#BACKUPS[@]}."
+    exit 1
+fi
 
-if [ ! -f "$BACKUP_RDB" ]; then
-    echo "ERROR: dump.rdb not found in $BACKUP_DIR"
+BACKUP_DIR="$BACKUP_BASE/${BACKUPS[$((sel-1))]}"
+BACKUP_AOF="$BACKUP_DIR/appendonly.aof"
+
+if [ ! -f "$BACKUP_AOF" ]; then
+    echo "ERROR: appendonly.aof not found in $BACKUP_DIR"
     exit 1
 fi
 
 echo ""
-echo "Selected: $BACKUP_RDB"
+echo "Selected: $BACKUP_AOF"
 echo ""
 echo "This will:"
 echo "  - Stop all Redis nodes (sentinels stay running)"
 echo "  - Wipe redis-master and redis-replica-1 data volumes"
-echo "  - Restore $BACKUP_RDB into redis-master"
+echo "  - Restore $BACKUP_AOF into redis-master"
 echo "  - Start redis-master (6.2) and redis-replica-1 (6.2)"
 echo "  - Reconfigure sentinels to track the restored master"
 echo ""
@@ -77,49 +82,17 @@ for vol in "${PROJECT_NAME}_redis-master-data" "${PROJECT_NAME}_redis-replica-1-
         sh -c "rm -f /data/dump.rdb /data/appendonly.aof /data/appendonly.aof.manifest && echo '  Done.'"
 done
 
-# ── Restore RDB and generate AOF ─────────────────────────────────────────────
-# Redis 6.2 with appendonly=yes ignores the RDB when no AOF exists — it starts
-# empty. We work around this by booting a temp container with appendonly=no
-# (which loads the RDB), then enabling AOF and triggering a rewrite so the data
-# is persisted in AOF format for the real startup.
-header "Restoring $BACKUP_RDB → redis-master..."
+# ── Restore AOF ───────────────────────────────────────────────────────────────
+header "Restoring $BACKUP_AOF → redis-master..."
 
 docker run --rm \
     -v "${PROJECT_NAME}_redis-master-data:/data" \
-    -v "$(cd "$(dirname "$BACKUP_RDB")" && pwd):/backup:ro" \
+    -v "$BACKUP_DIR:/backup:ro" \
     redis:6.2 \
-    sh -c "cp /backup/dump.rdb /data/dump.rdb && echo 'RDB copied.'"
-
-echo "Starting temp Redis to load RDB and generate AOF..."
-docker run --rm -d --name redis-restore \
-    -v "${PROJECT_NAME}_redis-master-data:/data" \
-    -v "$(pwd)/config/redis.conf:/config/redis.conf:ro" \
-    -p 6379:6379 \
-    redis:6.2 \
-    redis-server /config/redis.conf --appendonly no
-
-echo "Waiting for RDB load..."
-sleep 3
-
-KEY_COUNT=$(redis-cli -p 6379 --scan --pattern "testkey:*" | wc -l | tr -d ' ')
-echo "Keys loaded from RDB: $KEY_COUNT"
-
-echo "Enabling AOF and triggering rewrite..."
-redis-cli -p 6379 CONFIG SET appendonly yes > /dev/null
-redis-cli -p 6379 BGREWRITEAOF > /dev/null
-
-echo -n "Waiting for AOF rewrite to complete"
-while true; do
-    REWRITING=$(redis-cli -p 6379 info persistence 2>/dev/null | grep "^aof_rewrite_in_progress:" | tr -d '\r' | cut -d: -f2)
-    [ "$REWRITING" = "0" ] && break
-    echo -n "."
-    sleep 1
-done
-echo " done."
-
-docker stop redis-restore > /dev/null
+    sh -c "cp /backup/appendonly.aof /data/appendonly.aof && echo 'AOF copied.'"
 
 # ── Start Redis 6.2 nodes ────────────────────────────────────────────────────
+# Redis starts with appendonly=yes and finds appendonly.aof — loads it directly.
 header "Starting Redis 6.2 nodes..."
 docker-compose up -d redis-master redis-replica-1
 
